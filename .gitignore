@@ -1,0 +1,9 @@
+# ignore confidential projects 
+openai_experiments/
+
+# ignore data sets
+data_machine_learning/
+
+# ignore files build by reporting functionality
+results_machine_learning/
+

@@ -167,11 +167,36 @@ class ANN(torch.nn.Module):
 
 # f and g are both ANN's with n_hidden hidden dims
 n_hidden = 10
-f_model = ANN(2,n_hidden,1)
-g_model = ANN(2,n_hidden,1)
+f_model_net = ANN(2,n_hidden,1)
+g_model_net = ANN(2,n_hidden,1)
 
-# h is the map from (geometry, intensities) to class probabilities
-h_model = ANN(3*n_stations, 20, n_materials)
+def f_model(f_input_rz):
+    # input shape is [batch_shape, n_stations + 1]
+    z_repeated = f_input_rz[:,-1].unsqueeze(1).repeat([1,n_stations])
+    z_reshaped = z_repeated.reshape([-1,1])
+    geometry_reshaped = f_input_rz[:,0:n_stations].reshape([-1,1])
+    f_input_reshaped = torch.hstack((geometry_reshaped, z_reshaped))
+    
+    # z_repeated = f_input_rz[:,-1].repeat([1,n_stations]).T
+    # geometry_reshaped = f_input_rz[:,0:n_stations].T.reshape([-1,1])
+    # f_input_reshaped = torch.hstack((geometry_reshaped, z_repeated)) 
+    
+    result = f_model_net(f_input_reshaped).reshape([-1,n_stations])
+    return result
+
+def g_model(g_input_phiz):
+    # input shape is [batch_shape, n_stations + 1]
+    z_repeated = g_input_phiz[:,-1].unsqueeze(1).repeat([1,n_stations])
+    z_reshaped = z_repeated.reshape([-1,1])
+    geometry_reshaped = g_input_phiz[:,0:n_stations].reshape([-1,1])
+    g_input_reshaped = torch.hstack((geometry_reshaped, z_reshaped))
+    
+    # z_repeated = g_input_phiz[:,-1].repeat([1,n_stations]).T
+    # geometry_reshaped = g_input_phiz[:,0:n_stations].T.reshape([-1,1])
+    # g_input_reshaped = torch.hstack((geometry_reshaped, z_repeated)) 
+    
+    result = g_model_net(g_input_reshaped).reshape([-1,n_stations])
+    return result
 
 
 # iii) Construct the model
@@ -191,28 +216,23 @@ def model(geometry, observations = None):
         latent_z_dist = pyro.distributions.Categorical(probs = rel_probs).expand([n_obs])
         latent_z = pyro.sample('latent_z', latent_z_dist)
         
-        # f_input_rz = torch.hstack((geometry[:,:,0].T.reshape([-1,1]), latent_z.repeat([n_stations]).unsqueeze(1)))
-        # g_input_phiz = torch.hstack((geometry[:,:,1].T.reshape([-1,1]), latent_z.repeat([n_stations]).unsqueeze(1)))
-        # f_input_rz = torch.hstack((geometry[:,:,0].T.reshape([-1,1]), latent_z.repeat([1,n_stations]).T))
-        # g_input_phiz = torch.hstack((geometry[:,:,1].T.reshape([-1,1]), latent_z.repeat([1,n_stations]).T))
-        f_input_rz = torch.hstack((geometry[:,:,0].T.reshape([-1,1]), latent_z.repeat([1,n_stations]).T))
-        g_input_phiz = torch.hstack((geometry[:,:,1].T.reshape([-1,1]), latent_z.repeat([1,n_stations]).T))
+        f_input_rz = torch.hstack((geometry[:,:,0], latent_z.reshape([-1,1])))
+        g_input_phiz = torch.hstack((geometry[:,:,1], latent_z.reshape([-1,1])))
         
         f_vals = f_model(f_input_rz)
         g_vals = g_model(g_input_phiz)
         intensity = A_material * f_vals*g_vals
         
-        obs_dist = pyro.distributions.Normal(loc = intensity, scale = sigma)
+        obs_dist = pyro.distributions.Normal(loc = intensity, scale = sigma).to_event(1)
         obs = pyro.sample('obs', obs_dist, obs = observations)
         
         return obs
-
+    
 
 # @config_enumerate
 # def model(geometry, observations = None):
 #     # shapes
-#     n_obs = geometry.shape[0]*geometry.shape[1]
-#     n_latent = geometry.shape[0]
+#     n_obs = geometry.shape[0]
     
 #     # parameter setup    
 #     rel_probs = pyro.param('rel_probs', (1/n_materials)*torch.ones(n_materials),
@@ -221,21 +241,17 @@ def model(geometry, observations = None):
 
 #     # Local variables
 #     with pyro.plate('batch_plate', size = n_obs, dim = -1):
-#         latent_z_dist = pyro.distributions.Categorical(probs = rel_probs).expand([n_latent])
+#         latent_z_dist = pyro.distributions.Categorical(probs = rel_probs).expand([n_obs])
 #         latent_z = pyro.sample('latent_z', latent_z_dist)
         
-#         # f_input_rz = torch.hstack((geometry[:,:,0].T.reshape([-1,1]), latent_z.repeat([n_stations]).unsqueeze(1)))
-#         # g_input_phiz = torch.hstack((geometry[:,:,1].T.reshape([-1,1]), latent_z.repeat([n_stations]).unsqueeze(1)))
-#         # f_input_rz = torch.hstack((geometry[:,:,0].T.reshape([-1,1]), latent_z.repeat([1,n_stations]).T))
-#         # g_input_phiz = torch.hstack((geometry[:,:,1].T.reshape([-1,1]), latent_z.repeat([1,n_stations]).T))
-#         f_input_rz = torch.hstack((geometry[:,:,0].T.reshape([-1,1]), latent_z.repeat([1,n_stations]).T))
-#         g_input_phiz = torch.hstack((geometry[:,:,1].T.reshape([-1,1]), latent_z.repeat([1,n_stations]).T))
+#         f_input_rz = torch.hstack((geometry[:,:,0], latent_z.reshape([-1,1])))
+#         g_input_phiz = torch.hstack((geometry[:,:,1], latent_z.reshape([-1,1])))
         
 #         f_vals = f_model(f_input_rz)
 #         g_vals = g_model(g_input_phiz)
 #         intensity = A_material * f_vals*g_vals
         
-#         obs_dist = pyro.distributions.Normal(loc = intensity, scale = sigma)
+#         obs_dist = pyro.distributions.Normal(loc = intensity, scale = sigma).to_event(1)
 #         obs = pyro.sample('obs', obs_dist, obs = observations)
         
 #         return obs

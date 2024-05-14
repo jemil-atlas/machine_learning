@@ -135,7 +135,7 @@ geometry = torch.cat((r_points.T.unsqueeze(2),phi_points.T.unsqueeze(2)), dim = 
 
 # i) Neural network class
 
-class ANN(torch.nn.Module):
+class EnumANN(torch.nn.Module):
     def __init__(self, dim_input, dim_hidden, dim_output):
         # Initialize ANN class by initializing the superclass
         super().__init__()
@@ -150,44 +150,55 @@ class ANN(torch.nn.Module):
         # nonlinear transforms - produces positive numbers
         self.nonlinear = torch.nn.Sigmoid()
         
-    def forward(self, input_data):
-        # Define forward computation on the input input_data
-        # Shape the minibatch so that batch_dims are on left
-        input_data = input_data.reshape([-1, self.dim_input])
+    def forward(self, s, z):
+        # Input args: 
+        #   - s : Tensor of shape [n_obs, n_stations] represents either r or phi
+        #   - z : Tensor of shape [n_obs, n_stations] or [n_enumerate, n_obs, n_stations]
+        # Output has shape [1, n_obs, n_stations, 1] or is batched by enumeration
+        # to [n_enumerate, n_obs, n_stations, 1]
+
+        # Reshaping operations        
+    
+        # Convert z to unified [n_enumerate, n_obs, n_stations] where n_enumerate is 1 during simulation
+        if z.dim() == 2:
+            z_reshaped = z.unsqueeze(0)  # [n_obs,1] -> [1, n_obs,1]    
+        # Convert z to [n_enumerate, n_obs, n_stations]
+        z_reshaped = z_reshaped.expand(-1,-1,s.size(-1))
+        # Convert s to [n_enumerate, n_obs, n_stations]
+        s_reshaped = s.unsqueeze(0).expand(z_reshaped.size(0), -1,-1)
+        # Combine to arg of shape [n_enumerate, n_obs, n_station, 2]
+        arg = torch.stack((s_reshaped,z_reshaped), dim = -1)
         
-        # Then compute hidden units and output of nonlinear pass
-        hidden_units_1 = self.nonlinear(self.fc_1(input_data))
+        # Compute hidden units and output of nonlinear pass
+        arg_reshaped = arg.view(-1,2)
+        hidden_units_1 = self.nonlinear(self.fc_1(arg_reshaped))
         hidden_units_2 = self.nonlinear(self.fc_2(hidden_units_1))
         output = self.nonlinear(self.fc_3(hidden_units_2))
+        output_reshaped = output.view(z_reshaped.size(0), s_reshaped.size(1), s_reshaped.size(2))
         # The output is a scaling coefficient for each input
-        return output
+        
+        return output_reshaped
 
 
 # ii) Initialize f and g conversion functions
 
 # f and g are both ANN's with n_hidden hidden dims
 n_hidden = 10
-f_model_net = ANN(2,n_hidden,1)
-g_model_net = ANN(2,n_hidden,1)
+f_model_net = EnumANN(2,n_hidden,1)
+g_model_net = EnumANN(2,n_hidden,1)
 
-def f_model(f_input_rz):
-    # input shape is [batch_shape, n_stations + 1]
-    z_repeated = f_input_rz[:,-1].unsqueeze(1).repeat([1,n_stations])
-    z_reshaped = z_repeated.reshape([-1,1])
-    geometry_reshaped = f_input_rz[:,0:n_stations].reshape([-1,1])
-    f_input_reshaped = torch.hstack((geometry_reshaped, z_reshaped))
-    
-    result = f_model_net(f_input_reshaped).reshape([-1,n_stations])
+def f_model(r,z):
+    # Input shape is    r = [n_enumerate, n_obs, n_stations, 1]
+    #                   s = [n_enumerate, n_obs, n_stations, 1]
+    # Output shape is   result = [n_enumerate, n_obs, n_stations, 1]
+    result = f_model_net(r, z)
     return result
 
-def g_model(g_input_phiz):
-    # input shape is [batch_shape, n_stations + 1]
-    z_repeated = g_input_phiz[:,-1].unsqueeze(1).repeat([1,n_stations])
-    z_reshaped = z_repeated.reshape([-1,1])
-    geometry_reshaped = g_input_phiz[:,0:n_stations].reshape([-1,1])
-    g_input_reshaped = torch.hstack((geometry_reshaped, z_reshaped))
-        
-    result = g_model_net(g_input_reshaped).reshape([-1,n_stations])
+def g_model(phi, z):
+    # Input shape is    phi = [n_enumerate, n_obs, n_stations, 1]
+    #                   s = [n_enumerate, n_obs, n_stations, 1]
+    # Output shape is   result = [n_enumerate, n_obs, n_stations, 1]
+    result = f_model_net(phi, z)
     return result
 
 
@@ -204,26 +215,27 @@ def model(geometry, observations = None):
     sigma = pyro.param('sigma', torch.eye(1), constraint = pyro.distributions.constraints.positive)
 
     # Local variables
-    with pyro.plate('batch_plate', size = n_obs, dim = -1) as ind:
-        latent_z_dist = pyro.distributions.Categorical(probs = rel_probs)
-        latent_z = pyro.sample('latent_z', latent_z_dist)
+    with pyro.plate('batch_plate_obs', size = n_obs, dim = -2) as ind_o:
+        latent_z_dist = pyro.distributions.Categorical(probs = rel_probs).expand([n_obs,1])
+        latent_z = pyro.sample('latent_z', latent_z_dist, infer={"enumerate": "parallel"})
         
-        f_input_rz = torch.hstack((geometry[ind,:,0], latent_z.reshape([-1,1])))
-        g_input_phiz = torch.hstack((geometry[ind,:,1], latent_z.reshape([-1,1])))
-        
-        f_vals = f_model(f_input_rz)
-        g_vals = g_model(g_input_phiz)
-        intensity = A_material * f_vals*g_vals
-        
-        obs_dist = pyro.distributions.Normal(loc = intensity, scale = sigma).to_event(1)
-        obs = pyro.sample('obs', obs_dist, obs = observations)
-        
-        # Diagnosis
-        print("latent_z.shape = {}".format(latent_z.shape))
-        print("latent_z_dist.batch_shape = {}".format(latent_z_dist.batch_shape))
-        print("obs.shape = {}".format(obs.shape))
-        print("obs_dist.batch_shape = {}".format(obs_dist.batch_shape))
-        print("obs_dist.shape = {}".format(obs_dist.shape()))
+        with pyro.plate('batch_plate_stations', size = n_stations, dim = -1) as ind_s:            
+            r = geometry[ind_o.unsqueeze(-1),ind_s.unsqueeze(-2),0]
+            phi = geometry[ind_o.unsqueeze(-1),ind_s.unsqueeze(-2),1]
+            
+            f_vals = f_model(r, latent_z)
+            g_vals = g_model(phi, latent_z)
+            intensity = A_material * f_vals*g_vals
+            
+            obs_dist = pyro.distributions.Normal(loc = intensity, scale = sigma)
+            obs = pyro.sample('obs', obs_dist, obs = observations)
+            
+            # Diagnosis
+            print("latent_z.shape = {}".format(latent_z.shape))
+            print("latent_z_dist.batch_shape = {}".format(latent_z_dist.batch_shape))
+            print("obs.shape = {}".format(obs.shape))
+            print("obs_dist.batch_shape = {}".format(obs_dist.batch_shape))
+            print("obs_dist.shape = {}".format(obs_dist.shape()))
         
         return obs
     

@@ -53,8 +53,8 @@ from pyro.infer import config_enumerate
 
 n_points = 100
 n_stations = 2
-n_materials_true = 1
-n_materials = 1
+n_materials_true = 2
+n_materials = 2
 
 
 """
@@ -181,7 +181,45 @@ class EnumANN(torch.nn.Module):
         return output_reshaped
 
 
-# ii) Initialize f and g conversion functions
+# ii) Classifier ANN class
+
+class ClassifierANN(torch.nn.Module):
+    def __init__(self, dim_input, dim_hidden, dim_output):
+        # Initialize ANN class by initializing the superclass
+        super().__init__()
+        self.dim_input = dim_input
+        self.dim_output = dim_output
+        self.dim_hidden = dim_hidden
+        
+        # linear transforms
+        self.fc_1 = torch.nn.Linear(self.dim_input, dim_hidden)
+        self.fc_2 = torch.nn.Linear(dim_hidden, dim_hidden)
+        self.fc_3 = torch.nn.Linear(dim_hidden, self.dim_output)
+        # nonlinear transforms - produces positive numbers
+        self.nonlinear = torch.nn.Sigmoid()
+        
+    def forward(self, r, phi, intensity):
+        # Input args: 
+        #   - r : Tensor of shape [n_obs, n_stations] 
+        #   - phi : Tensor of shape [n_obs, n_stations] 
+        #   - intensity :Tensor of shape [n_obs, n_stations] 
+        # Output has shape [n_obs, 1, n_materials]
+
+        # Combine to arg of shape [n_obs, n_station, 3]
+        arg = torch.stack((r, phi, intensity), dim = -1)
+        
+        # Compute hidden units and output of nonlinear pass
+        arg_reshaped = arg.reshape([-1, self.dim_input])
+        hidden_units_1 = self.nonlinear(self.fc_1(arg_reshaped))
+        hidden_units_2 = self.nonlinear(self.fc_2(hidden_units_1))
+        output = self.nonlinear(self.fc_3(hidden_units_2))
+        output_reshaped = output.reshape([r.shape[0], 1, self.dim_output])
+        # The output is a relative class probability for each observed point
+        
+        return output_reshaped
+
+
+# iii) Initialize f and g conversion functions, and classifier h
 
 # f and g are both ANN's with n_hidden hidden dims
 n_hidden = 10
@@ -202,38 +240,47 @@ def g_model(phi, z):
     result = f_model_net(phi, z)
     return result
 
+h_classifier_net = ClassifierANN(n_stations * 3, n_hidden, n_materials)
+def h_classifier(r, phi, intensity):
+    # Input shape is    r = [n_obs, n_stations, 1]
+    #                   phi = [n_obs, n_stations, 1]
+    #                   intensity = [n_obs, n_stations, 1]
+    # Output shape is   result = [n_enumerate, n_obs, n_stations, 1]
+    result = h_classifier_net(r, phi, intensity)
+    return result
 
 # iii) Construct the model
 
 @config_enumerate
-def model(geometry, observations = None):
-    # Initializations, shapes and parameters
+def model(geometry, intensity_observations):
+    # Initializations and shapes
     pyro.module('f_ann', f_model_net)
     pyro.module('g_ann', g_model_net)
+    pyro.module('h_ann', h_classifier_net)
     
     n_obs = geometry.shape[0]
     
-    # parameter setup    
-    rel_probs = pyro.param('rel_probs', (1/n_materials)*torch.ones(n_materials),
-                           pyro.distributions.constraints.simplex)
+    # Set up inputs and parameters
+    r = geometry[:,:,0]
+    phi = geometry[:,:,1]
+    # rel_probs have shape [n_obs, n_stations, n_materials]
+    rel_probs = h_classifier(r, phi, intensity_observations)
+    
     sigma = 0.01 * torch.eye(1)
-    # sigma = pyro.param('sigma', 0.01*torch.eye(1), constraint = pyro.distributions.constraints.positive)
 
     # Local variables
-    with pyro.plate('batch_plate_obs', size = n_obs, dim = -2) as ind_o:
-        latent_z_dist = pyro.distributions.Categorical(probs = rel_probs).expand([n_obs,1])
+    with pyro.plate('batch_plate_obs', size = n_obs, dim = -2):
+        latent_z_dist = pyro.distributions.Categorical(probs = rel_probs)
         latent_z = pyro.sample('latent_z', latent_z_dist)
         
-        with pyro.plate('batch_plate_stations', size = n_stations, dim = -1) as ind_s:            
-            r = geometry[ind_o.unsqueeze(-1),ind_s.unsqueeze(-2),0]
-            phi = geometry[ind_o.unsqueeze(-1),ind_s.unsqueeze(-2),1]
+        with pyro.plate('batch_plate_stations', size = n_stations, dim = -1):            
             
             f_vals = f_model(r, latent_z)
             g_vals = g_model(phi, latent_z)
-            intensity = A_material * f_vals*g_vals
+            intensity_prediction = A_material * f_vals*g_vals
             
-            obs_dist = pyro.distributions.Normal(loc = intensity, scale = sigma)
-            obs = pyro.sample('obs', obs_dist, obs = observations)
+            obs_dist = pyro.distributions.Normal(loc = intensity_prediction, scale = sigma)
+            obs = pyro.sample('obs', obs_dist, obs = intensity_observations)
             
             # # Diagnosis
             # print("latent_z.shape = {}".format(latent_z.shape))
@@ -247,7 +294,7 @@ def model(geometry, observations = None):
 
 # iv) Construct the guide
 
-def guide(geometry, observations = None):
+def guide(geometry, intensity_observations):
     pass
 
 
@@ -279,11 +326,16 @@ for step in range(2000):
 
 
 # ii) Simulate from trained model
-simulation_trained, latent_z_trained = copy.copy(model(geometry))
+simulation_trained, latent_z_trained = copy.copy(model(geometry, intensity_data_noisy))
 simulation_trained = simulation_trained.detach()
 latent_z_trained = latent_z_trained.detach()
 
-
+# predicted classes
+class_indices_predicted = []
+for k in range(n_materials):
+    class_indices_predicted.append(torch.where(latent_z_trained == k)[0])
+    
+    
 
 """
     5. Plots and illustrations
@@ -295,7 +347,7 @@ latent_z_trained = latent_z_trained.detach()
 fig, ax = plt.subplots(4,1, figsize = (5,15), dpi = 300)
 
 # geometric configuration
-for k in range(n_materials):    
+for k in range(n_materials_true):    
     ax[0].scatter(x_points[class_indices[k]], y_points[class_indices[k]], label = 'points mclass {}'.format(k))
 ax[0].scatter(x_stations, y_stations, label = 'stations')
 ax[0].legend()
@@ -356,6 +408,19 @@ ax[3].plot(predicted_data.detach(), label = 'intensity_data')
 ax[3].set_title('Predicted intensity data')
 
 
+# iv) Class predictions
 
+fig, ax = plt.subplots(2,1, figsize = (5,15), dpi = 300)
 
-
+# geometric configuration
+for k in range(n_materials_true):    
+    ax[0].scatter(x_points[class_indices[k]], y_points[class_indices[k]], label = 'points mclass {}'.format(k))
+ax[0].scatter(x_stations, y_stations, label = 'stations')
+ax[0].legend()
+ax[0].set_title('True classes')
+    
+for k in range(n_materials):    
+    ax[1].scatter(x_points[class_indices_predicted[k]], y_points[class_indices_predicted[k]], label = 'points mclass {}'.format(k))
+ax[1].scatter(x_stations, y_stations, label = 'stations')
+ax[1].legend()
+ax[1].set_title('Predicted classes')

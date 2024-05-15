@@ -52,6 +52,9 @@ from pyro.infer import config_enumerate
 n_points = 100
 n_stations = 2
 
+pyro.set_rng_seed(1)
+
+
 
 """
     2. Simulate some data
@@ -182,12 +185,12 @@ def model(geometry, observations = None):
     pyro.module('f_ann', f_model_net)
     pyro.module('g_ann', g_model_net)
     
-    n_obs = geometry.shape[0]
-    sigma = 0.01 * torch.eye(1)
-    # sigma = pyro.param('sigma', 0.01*torch.eye(1), constraint = pyro.distributions.constraints.positive)
+    n_points = geometry.shape[0]
+    # sigma = 0.01 * torch.eye(1)
+    sigma = pyro.param('sigma', 0.01*torch.eye(1), constraint = pyro.distributions.constraints.positive)
 
     # Local variables
-    with pyro.plate('batch_plate_obs', size = n_obs, dim = -2) as ind_o:       
+    with pyro.plate('batch_plate_points', size = n_points, dim = -2) as ind_o:       
         with pyro.plate('batch_plate_stations', size = n_stations, dim = -1) as ind_s:            
             r = geometry[ind_o.unsqueeze(-1),ind_s.unsqueeze(-2),0]
             phi = geometry[ind_o.unsqueeze(-1),ind_s.unsqueeze(-2),1]
@@ -200,7 +203,7 @@ def model(geometry, observations = None):
             obs = pyro.sample('obs', obs_dist, obs = observations)
         
     return obs
-    
+pyro.render_model(model, model_args=(geometry,), render_distributions=True, render_params=True)    
 
 # iv) Construct the guide
 

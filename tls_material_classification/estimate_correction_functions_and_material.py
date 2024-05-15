@@ -56,6 +56,9 @@ n_stations = 2
 n_materials_true = 3
 n_materials = 3
 
+pyro.set_rng_seed(1)
+
+
 
 """
     2. Simulate some data
@@ -258,7 +261,7 @@ def model(geometry, intensity_observations):
     pyro.module('g_ann', g_model_net)
     pyro.module('h_ann', h_classifier_net)
     
-    n_obs = geometry.shape[0]
+    n_points = geometry.shape[0]
     
     # Set up inputs and parameters
     r = geometry[:,:,0]
@@ -269,7 +272,7 @@ def model(geometry, intensity_observations):
     sigma = 0.01 * torch.eye(1)
 
     # Local variables
-    with pyro.plate('batch_plate_obs', size = n_obs, dim = -2):
+    with pyro.plate('batch_plate_points', size = n_points, dim = -2):
         latent_z_dist = pyro.distributions.Categorical(probs = rel_probs)
         latent_z = pyro.sample('latent_z', latent_z_dist)
         
@@ -290,6 +293,7 @@ def model(geometry, intensity_observations):
             # print("obs_dist.shape = {}".format(obs_dist.shape()))
         
         return obs, latent_z
+pyro.render_model(model, model_args=(geometry, intensity_data_noisy), render_distributions=True, render_params=True)
     
 
 # iv) Construct the guide
@@ -410,7 +414,7 @@ ax[3].set_title('Predicted intensity data')
 
 # iv) Class predictions
 
-fig, ax = plt.subplots(2,1, figsize = (5,15), dpi = 300)
+fig, ax = plt.subplots(2,1, figsize = (10,10), dpi = 300)
 
 # geometric configuration
 for k in range(n_materials_true):    

@@ -54,7 +54,7 @@ from pyro.infer import config_enumerate
 n_points = 100
 n_stations = 2
 n_materials_true = 3
-n_materials = 3
+n_materials = 2
 
 pyro.set_rng_seed(1)
 

@@ -44,11 +44,11 @@ torch.set_default_dtype(torch.float64)
 n_simu = 10000
 n_disc = 1000
 
-lambda_1_mean = 0.430   # in mu m
+lambda_1_mean = 0.400   # in mu m
 lambda_2_mean = 0.860   # in mu m
 
-lambda_1_sigma = 0.050
-lambda_2_sigma = 0.050
+lambda_1_sigma = 0.025
+lambda_2_sigma = 0.025
 
 lambda_spread = 0.2
 
